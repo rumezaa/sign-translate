@@ -1,6 +1,7 @@
 from collections import deque
 
 import cv2
+import mediapipe as mp
 import numpy as np
 import torch
 import torch.nn as nn
@@ -41,58 +42,95 @@ preprocess = transforms.Compose([
 WINDOW = 10
 pred_window = deque(maxlen=WINDOW)
 
-def predict(frame_bgr):
-    # Convert BGR -> RGB -> PIL
-    rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-    pil = Image.fromarray(rgb)
+@torch.no_grad()
+def predict_pil(pil_img):
+    x = preprocess(pil_img).unsqueeze(0).to(DEVICE)
+    logits = model(x)
+    probs = torch.softmax(logits, dim=1).squeeze(0)
+    conf, idx = torch.max(probs, dim=0)
+    return classes[idx.item()], float(conf.item())
 
-    x = preprocess(pil).unsqueeze(0).to(DEVICE)
-    with torch.no_grad():
-        logits = model(x)
-        probs = torch.softmax(logits, dim=1)[0]
-        conf, pred = torch.max(probs, dim=0)
-    return pred.item(), conf.item()
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
 
-cap = cv2.VideoCapture(0)
-if not cap.isOpened():
-    raise RuntimeError("Could not open webcam. Try a different camera index (0,1,2).")
+def landmarks_to_bbox(landmarks, w, h, pad=0.25):
+    xs = [lm.x for lm in landmarks]
+    ys = [lm.y for lm in landmarks]
+    x1, x2 = min(xs), max(xs)
+    y1, y2 = min(ys), max(ys)
 
-print("Press 'q' to quit.")
+    # convert to pixel coords
+    x1 = int(x1 * w); x2 = int(x2 * w)
+    y1 = int(y1 * h); y2 = int(y2 * h)
 
-while True:
-    ok, frame = cap.read()
-    if not ok:
-        break
+    # pad
+    bw = x2 - x1
+    bh = y2 - y1
+    x1 = int(x1 - pad * bw)
+    x2 = int(x2 + pad * bw)
+    y1 = int(y1 - pad * bh)
+    y2 = int(y2 + pad * bh)
 
-    # crop to center square 
-    h, w = frame.shape[:2]
-    side = min(h, w)
-    x0 = (w - side) // 2
-    y0 = (h - side) // 2
-    crop = frame[y0:y0+side, x0:x0+side]
+    x1 = clamp(x1, 0, w-1)
+    x2 = clamp(x2, 0, w-1)
+    y1 = clamp(y1, 0, h-1)
+    y2 = clamp(y2, 0, h-1)
 
-    pred_idx, conf = predict(crop)
-    pred_window.append(pred_idx)
+    return x1, y1, x2, y2
 
-    # majority vote smoothing
-    smoothed_idx = max(set(pred_window), key=pred_window.count)
-    label = classes[smoothed_idx]
+def main():
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        raise RuntimeError("Could not open webcam.")
 
-    # Confidence threshold
-    if conf < 0.60:
-        label_to_show = "—"
-    else:
-        label_to_show = f"{label} ({conf:.2f})"
+    # load media pipe hands - this will help us focus on the hand
+    mp_hands = mp.solutions.hands
+    hands = mp_hands.Hands(
+        static_image_mode=False,
+        max_num_hands=1,
+        model_complexity=1,
+        min_detection_confidence=0.6,
+        min_tracking_confidence=0.6
+    )
 
-    # Draw UI
-    cv2.rectangle(frame, (x0, y0), (x0+side, y0+side), (0, 255, 0), 2)
-    cv2.putText(frame, label_to_show, (20, 60),
-                cv2.FONT_HERSHEY_SIMPLEX, 1.6, (0, 255, 0), 3)
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
 
-    cv2.imshow("ASL Webcam", frame)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+        h, w, _ = frame.shape
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        result = hands.process(frame_rgb)
 
-cap.release()
-cv2.destroyAllWindows()
+        display_text = "No hand"
+        if result.multi_hand_landmarks:
+            hand_lms = result.multi_hand_landmarks[0].landmark
+            x1, y1, x2, y2 = landmarks_to_bbox(hand_lms, w, h, pad=0.35)
 
+            # crop and predict
+            crop_bgr = frame[y1:y2, x1:x2]
+            crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+            pil = Image.fromarray(crop_rgb)
+
+            pred, conf = predict_pil(pil)
+            display_text = f"{pred} ({conf:.2f})"
+
+            # draw bbox + landmarks
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            for lm in hand_lms:
+                cx, cy = int(lm.x * w), int(lm.y * h)
+                cv2.circle(frame, (cx, cy), 2, (255, 0, 0), -1)
+
+        cv2.putText(frame, display_text, (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 255, 0), 2, cv2.LINE_AA)
+
+        cv2.imshow("ASL V2 - MediaPipe Crop", frame)
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
+
+    hands.close()
+    cap.release()
+    cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()
