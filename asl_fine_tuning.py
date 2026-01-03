@@ -843,7 +843,7 @@ print("  - Improved performance with diverse backgrounds")
   - Different backgrounds
   - Hand position variations
 
-### Testing Your Model:
+### Testingr Model:
 1. Replace your webcam inference model with `asl_resnet18_finetuned.pth`
 2. Test each letter 5-10 times in different conditions
 3. Note prediction stability (less flickering between letters)
@@ -861,6 +861,4 @@ This approach addresses the **domain gap** between clean training data and noisy
 - Maintaining frame-based architecture (no sequence modeling needed)
 - Using identical preprocessing at train and test time
 - Accepting slight validation accuracy drop for practical robustness gains
-
-**Good luck with your project!** 🚀
 """
